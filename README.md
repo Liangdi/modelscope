@@ -46,13 +46,17 @@ modelscope -m <MODEL_ID> -s <SAVE_DIR>
 ## Commands
 
 ```shell
-Usage: modelscope [OPTIONS] --model-id <MODEL_ID>
+Usage: modelscope <COMMAND>
+
+Commands:
+  download  Download model
+  login     Login to modelscope use your token
+  logout    Logout
+  help      Print this message or the help of the given subcommand(s)
 
 Options:
-  -m, --model-id <MODEL_ID>  model id
-  -s, --save-dir <SAVE_DIR>  save dir, if not set, use current dir, will create if not exists [default: ]
-  -h, --help                 Print help
-  -V, --version              Print version
+  -h, --help     Print help
+  -V, --version  Print versio
 ```
 
 ## Library

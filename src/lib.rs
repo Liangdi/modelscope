@@ -1,7 +1,8 @@
-use anyhow::bail;
+use anyhow::{Context, bail};
 use futures_util::StreamExt;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::Deserialize;
+use std::env::home_dir;
 use std::fs;
 use std::io::{BufWriter, Seek, Write};
 use std::path::PathBuf;
@@ -9,6 +10,9 @@ use std::sync::Arc;
 
 const FILES_URL: &str = "https://modelscope.cn/api/v1/models/<model_id>/repo/files?Recursive=true";
 const DOWNLOAD_URL: &str = "https://modelscope.cn/models/<model_id>/resolve/master/<path>";
+const LOGIN_URL: &str = "https://modelscope.cn/api/v1/login";
+const DIR: &str = ".modelscope";
+const COOKIES_FILE: &str = "cookies";
 
 const UA: (&str, &str) = (
     "User-Agent",
@@ -19,9 +23,14 @@ pub struct ModelScope;
 #[derive(Debug, Deserialize)]
 struct ModelScopeResponse {
     #[serde(rename = "Code")]
-    code: i32,
+    #[allow(unused)]
+    code: i64,
+    #[serde(rename = "Success")]
+    success: bool,
+    #[serde(rename = "Message")]
+    message: String,
     #[serde(rename = "Data")]
-    data: ModelScopeResponseData,
+    data: Option<ModelScopeResponseData>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,6 +56,16 @@ struct RepoFile {
 const BAR_STYLE: &str = "{msg:<30} {bar} {decimal_bytes:<10} / {decimal_total_bytes:<10} {decimal_bytes_per_sec:<12} {percent:<3}%  {eta_precise}";
 
 impl ModelScope {
+    async fn get_client() -> anyhow::Result<reqwest::Client> {
+        let client = reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(10));
+        let mut default_headers = reqwest::header::HeaderMap::new();
+        if let Some(cookies) = Self::get_cookies()? {
+            default_headers.insert("Cookie", cookies.parse()?);
+        }
+        let client = client.default_headers(default_headers);
+        Ok(client.build()?)
+    }
+
     pub async fn download(model_id: &str, save_dir: impl Into<PathBuf>) -> anyhow::Result<()> {
         let save_dir = save_dir.into().join(model_id);
 
@@ -57,16 +76,25 @@ impl ModelScope {
         fs::create_dir_all(&save_dir)?;
 
         let files_url = FILES_URL.replace("<model_id>", model_id);
-        let resp = reqwest::get(files_url).await?;
-        let response = resp.json::<ModelScopeResponse>().await?;
-        if response.code != 200 {
-            bail!("Failed to get model files: {}", response.code);
-        }
-        let data = response.data;
-        let repo_files = data.files;
 
-        let client = reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(10));
-        let client = Arc::new(client.build()?);
+        let client = Arc::new(Self::get_client().await?);
+
+        let resp = client.get(files_url).send().await?;
+
+        if !resp.status().is_success() {
+            bail!(
+                "Failed to get model files: {}\nTip: Maybe the model ID is incorrect or login is required",
+                resp.text().await?
+            );
+        }
+
+        let response = resp.json::<ModelScopeResponse>().await?;
+        if !response.success {
+            bail!("Failed to get model files: {}", response.message);
+        }
+
+        let data = response.data.unwrap();
+        let repo_files = data.files;
 
         let mut tasks = Vec::new();
         let bars = MultiProgress::new();
@@ -190,6 +218,78 @@ impl ModelScope {
 
         bar.finish();
 
+        Ok(())
+    }
+
+    pub async fn login(token: &str) -> anyhow::Result<()> {
+        println!("Logging in...");
+        let client = Self::get_client().await?;
+        let resp = client
+            .post(LOGIN_URL)
+            .json(&serde_json::json!({
+                "AccessToken": token
+            }))
+            .send()
+            .await?;
+
+        let status = resp.status();
+
+        if !status.is_success() {
+            bail!("Failed to login: {}", resp.text().await?);
+        }
+
+        let cookies: serde_json::Value = resp
+            .cookies()
+            .map(|cookie| (cookie.name().to_string(), cookie.value().to_string()))
+            .collect();
+
+        let dir = home_dir()
+            .context("Failed to get home directory")?
+            .join(DIR);
+
+        fs::create_dir_all(&dir)?;
+
+        let cookies_file = dir.join(COOKIES_FILE);
+        fs::write(cookies_file, cookies.to_string())?;
+
+        println!("Login successful.");
+
+        Ok(())
+    }
+
+    fn get_cookies() -> anyhow::Result<Option<String>> {
+        let cookies_file = home_dir()
+            .context("Failed to get home directory")?
+            .join(DIR)
+            .join(COOKIES_FILE);
+
+        if cookies_file.exists() {
+            let cookies = fs::read_to_string(cookies_file)?;
+            let cookies: serde_json::Value = serde_json::from_str(&cookies)?;
+
+            let cookies = cookies
+                .as_object()
+                .context("Failed to parse cookies")?
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v.as_str().unwrap_or_default()))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Ok(Some(cookies));
+        }
+
+        Ok(None)
+    }
+
+    pub async fn logout() -> anyhow::Result<()> {
+        // May just delete cookies file
+        let cookies_file = home_dir()
+            .context("Failed to get home directory")?
+            .join(DIR)
+            .join(COOKIES_FILE);
+        if cookies_file.exists() {
+            fs::remove_file(cookies_file)?;
+        }
+        println!("Logged out.");
         Ok(())
     }
 }
