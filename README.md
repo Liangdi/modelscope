@@ -38,7 +38,7 @@ cargo install modelscope
 ## Usage
 
 ```shell
-modelscope -m <MODEL_ID> -s <SAVE_DIR>
+modelscope download -m <MODEL_ID> -s <SAVE_DIR>
 ```
 
 ![img.png](screenshot.png)
