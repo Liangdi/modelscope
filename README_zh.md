@@ -50,11 +50,12 @@ Commands:
   download  Download model
   login     Login to modelscope use your token
   logout    Logout
+  list      List all local models
   help      Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help     Print help
-  -V, --version  Print versio
+  -V, --version  Print version
 ```
 
 ## 在lib中使用

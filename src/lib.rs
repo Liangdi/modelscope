@@ -1,11 +1,11 @@
 use anyhow::{Context, bail};
 use futures_util::StreamExt;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::env::home_dir;
 use std::fs;
 use std::io::{BufWriter, Seek, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const FILES_URL: &str = "https://modelscope.cn/api/v1/models/<model_id>/repo/files?Recursive=true";
@@ -67,13 +67,18 @@ impl ModelScope {
     }
 
     pub async fn download(model_id: &str, save_dir: impl Into<PathBuf>) -> anyhow::Result<()> {
-        let save_dir = save_dir.into().join(model_id);
-
-        println!();
-        println!("Downloading model {} to: {}", model_id, save_dir.display());
-        println!();
-
+        // Model root dir
+        let save_dir = save_dir.into();
         fs::create_dir_all(&save_dir)?;
+
+        // Model save dir, like <save_dir>/<model_id>
+        let model_dir = save_dir.join(model_id);
+
+        println!();
+        println!("Downloading model {} to: {}", model_id, model_dir.display());
+        println!();
+
+        fs::create_dir_all(&model_dir)?;
 
         let files_url = FILES_URL.replace("<model_id>", model_id);
 
@@ -96,13 +101,17 @@ impl ModelScope {
         let data = response.data.unwrap();
         let repo_files = data.files;
 
+        // Add the incoming model save path to the known model paths
+        // This is used when using the list command
+        Config::append_save_dir(&save_dir)?;
+
         let mut tasks = Vec::new();
         let bars = MultiProgress::new();
 
         for repo_file in repo_files.into_iter().filter(|f| f.r#type == "blob") {
             let model_id = model_id.to_string();
             let client = client.clone();
-            let save_dir = save_dir.clone();
+            let save_dir = model_dir.clone();
 
             let bar = ProgressBar::new(repo_file.size);
             let style = ProgressStyle::default_bar().template(BAR_STYLE)?;
@@ -243,11 +252,7 @@ impl ModelScope {
             .map(|cookie| (cookie.name().to_string(), cookie.value().to_string()))
             .collect();
 
-        let dir = home_dir()
-            .context("Failed to get home directory")?
-            .join(DIR);
-
-        fs::create_dir_all(&dir)?;
+        let dir = Dirs::config_dir()?;
 
         let cookies_file = dir.join(COOKIES_FILE);
         fs::write(cookies_file, cookies.to_string())?;
@@ -258,10 +263,7 @@ impl ModelScope {
     }
 
     fn get_cookies() -> anyhow::Result<Option<String>> {
-        let cookies_file = home_dir()
-            .context("Failed to get home directory")?
-            .join(DIR)
-            .join(COOKIES_FILE);
+        let cookies_file = Dirs::config_dir()?.join(COOKIES_FILE);
 
         if cookies_file.exists() {
             let cookies = fs::read_to_string(cookies_file)?;
@@ -282,14 +284,131 @@ impl ModelScope {
 
     pub async fn logout() -> anyhow::Result<()> {
         // May just delete cookies file
-        let cookies_file = home_dir()
-            .context("Failed to get home directory")?
-            .join(DIR)
-            .join(COOKIES_FILE);
+        let cookies_file = Dirs::config_dir()?.join(COOKIES_FILE);
         if cookies_file.exists() {
             fs::remove_file(cookies_file)?;
         }
         println!("Logged out.");
         Ok(())
+    }
+
+    pub async fn list() -> anyhow::Result<Vec<(String, String)>> {
+        // Known model save paths
+        let model_paths = Config::get_known_save_dirs()?;
+
+        let mut models = vec![];
+        for model_path in model_paths {
+            for dir in fs::read_dir(model_path)? {
+                let dir = dir?;
+                // This level is the model vendor, and the next level is the model name
+                if dir.file_type()?.is_dir() {
+                    for entry in fs::read_dir(dir.path())? {
+                        let entry = entry?;
+                        if entry.file_type()?.is_dir() {
+                            models.push((
+                                // Model ID
+                                format!(
+                                    "{}/{}",
+                                    dir.file_name().display(),
+                                    entry.file_name().display()
+                                ),
+                                // Model path
+                                dir.path().display().to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(models)
+    }
+}
+
+struct Dirs {}
+impl Dirs {
+    fn base_dir() -> anyhow::Result<PathBuf> {
+        let base_dir = home_dir()
+            .context("Failed to get home directory")?
+            .join(DIR);
+        if !base_dir.exists() {
+            fs::create_dir_all(&base_dir)?;
+        }
+        Ok(base_dir)
+    }
+
+    fn config_dir() -> anyhow::Result<PathBuf> {
+        let config_dir = Self::base_dir()?.join("config");
+        if !config_dir.exists() {
+            fs::create_dir_all(&config_dir)?;
+        }
+        Ok(config_dir)
+    }
+
+    #[allow(unused)]
+    pub fn model_dir() -> anyhow::Result<PathBuf> {
+        let model_dir = Self::base_dir()?.join("models");
+        if !model_dir.exists() {
+            fs::create_dir_all(&model_dir)?;
+        }
+        Ok(model_dir)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Config {
+    known_save_dirs: Vec<PathBuf>,
+}
+
+impl Config {
+    const KNOWN_SAVE_DIRS: &'static str = "known_save_dirs";
+    fn append_save_dir(dir: &Path) -> anyhow::Result<()> {
+        let f = Dirs::config_dir()?.join(Self::KNOWN_SAVE_DIRS);
+
+        // Get existing known save dirs
+        let mut known_save_dirs = Self::get_known_save_dirs()?;
+
+        // Canonicalize the directory
+        let dir = dir.canonicalize()?;
+
+        if known_save_dirs.contains(&dir) {
+            return Ok(());
+        }
+
+        known_save_dirs.push(dir);
+        fs::write(
+            f,
+            known_save_dirs
+                .iter()
+                .filter(|p| p.exists())
+                .map(|p| p.display().to_string())
+                .filter(|s| !s.trim().is_empty())
+                .collect::<Vec<String>>()
+                .join("\n"),
+        )?;
+
+        Ok(())
+    }
+
+    fn get_known_save_dirs() -> anyhow::Result<Vec<PathBuf>> {
+        let config_dir = Dirs::config_dir()?;
+        if !config_dir.exists() {
+            fs::create_dir_all(&config_dir)?;
+            return Ok(vec![]);
+        }
+
+        let f = config_dir.join(Self::KNOWN_SAVE_DIRS);
+        if !f.exists() {
+            return Ok(vec![]);
+        }
+
+        let paths = fs::read_to_string(f)?
+            .lines()
+            .map(PathBuf::from)
+            // Filter out non-existent paths
+            // These paths will be cleaned up when append_save_dir is called
+            .filter(|p| p.exists())
+            .collect::<Vec<_>>();
+
+        Ok(paths)
     }
 }
