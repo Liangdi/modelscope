@@ -16,4 +16,6 @@ reqwest = { version = "0.12.23", features = ["json", "stream", "cookies"] }
 clap = { version = "4.5.47", features = ["derive"] }
 indicatif = "0.18.0"
 futures-util = "0.3.31"
+
+[target.x86_64-unknown-linux-musl.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
