@@ -59,6 +59,14 @@ impl Clone for ProgressBarCallback {
 #[async_trait]
 impl ProgressCallback for ProgressBarCallback {
     async fn on_file_start(&self, file_name: &str, file_size: u64) {
+        // 检查是否已经存在相同名称的进度条
+        {
+            let bars = self.progress_bars.lock().unwrap();
+            if bars.contains_key(file_name) {
+                return; // 如果已存在，不再创建新的进度条
+            }
+        }
+        
         let bar = ProgressBar::new(file_size);
         let style = ProgressStyle::default_bar().template(BAR_STYLE).unwrap();
         bar.set_style(style);
@@ -353,8 +361,6 @@ impl ModelScope {
         let path = &repo_file.path;
         let name = &repo_file.name;
 
-        callback.on_file_start(name, repo_file.size).await;
-
         let file_path = save_dir.join(path);
         if let Some(parent) = file_path.parent() {
             fs::create_dir_all(parent)?;
@@ -379,10 +385,14 @@ impl ModelScope {
             .replace("<model_id>", &model_id)
             .replace("<path>", path);
 
+        // Now we call on_file_start after checking if file exists
+        callback.on_file_start(name, repo_file.size).await;
+
         let mut rb = client.get(&url).header(UA.0, UA.1);
 
         // Already downloaded, just return ok.
         if existing_size == repo_file.size {
+            callback.on_file_progress(name, repo_file.size, repo_file.size).await;
             callback.on_file_complete(name).await;
             return Ok(());
         }
@@ -403,6 +413,7 @@ impl ModelScope {
             file.rewind()?;
             file.get_ref().set_len(0)?;
             existing_size = 0;
+            callback.on_file_progress(name, 0, repo_file.size).await;
         }
 
         // If status is not success or partial content, bail
