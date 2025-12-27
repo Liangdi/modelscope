@@ -28,6 +28,18 @@ enum SubCommand {
         #[arg(short, long, default_value_os_t = Args::default_save_dir())]
         save_dir: PathBuf,
     },
+    /// Download a single file from a model
+    DownloadFile {
+        /// Model ID
+        #[arg(short, long)]
+        model_id: String,
+        /// File path in the model repository
+        #[arg(short, long)]
+        file_path: String,
+        /// The path to save the file, will be created if not exists
+        #[arg(short, long, default_value_os_t = Args::default_save_dir())]
+        save_dir: PathBuf,
+    },
     /// Login to modelscope use your token
     Login {
         /// modelscope token
@@ -46,6 +58,13 @@ async fn main() -> anyhow::Result<()> {
     match args.command {
         SubCommand::Download { model_id, save_dir } => {
             ModelScope::download(&model_id, &save_dir).await?;
+        }
+        SubCommand::DownloadFile {
+            model_id,
+            file_path,
+            save_dir,
+        } => {
+            ModelScope::download_single_file(&model_id, &file_path, &save_dir).await?;
         }
         SubCommand::Login { token } => {
             ModelScope::login(&token).await?;

@@ -262,6 +262,63 @@ impl ModelScope {
         Ok(())
     }
 
+    pub async fn download_single_file(
+        model_id: &str,
+        file_path: &str,
+        save_dir: impl Into<PathBuf>,
+    ) -> anyhow::Result<()> {
+        let save_dir = save_dir.into();
+        fs::create_dir_all(&save_dir)?;
+
+        let model_dir = save_dir.join(model_id);
+        fs::create_dir_all(&model_dir)?;
+
+        println!();
+        println!(
+            "Downloading file {} from model {} to: {}",
+            file_path,
+            model_id,
+            model_dir.display()
+        );
+        println!();
+
+        let files_url = FILES_URL.replace("<model_id>", model_id);
+
+        let client = Arc::new(Self::get_client().await?);
+
+        // Get file list from API
+        let resp = client.get(files_url).send().await?;
+
+        if !resp.status().is_success() {
+            bail!(
+                "Failed to get model files: {}\nTip: Maybe the model ID is incorrect or login is required",
+                resp.text().await?
+            );
+        }
+
+        let response = resp.json::<ModelScopeResponse>().await?;
+        if !response.success {
+            bail!("Failed to get model files: {}", response.message);
+        }
+
+        let data = response.data.unwrap();
+        let repo_files = data.files;
+
+        // Find the target file
+        let repo_file = repo_files
+            .into_iter()
+            .find(|f| f.path == file_path && f.r#type == "blob")
+            .ok_or_else(|| anyhow::anyhow!("File not found in model: {}", file_path))?;
+
+        let bar = ProgressBar::new(repo_file.size);
+        let style = ProgressStyle::default_bar().template(BAR_STYLE)?;
+        bar.set_style(style);
+
+        Self::download_file(client, model_id.to_string(), repo_file, model_dir, bar).await?;
+
+        Ok(())
+    }
+
     fn get_cookies() -> anyhow::Result<Option<String>> {
         let cookies_file = Dirs::config_dir()?.join(COOKIES_FILE);
 
