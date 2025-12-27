@@ -14,13 +14,13 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            asset_name: modelscope-linux-amd64.tar.gz
+            asset_name: modelscope-ng-linux-amd64.tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            asset_name: modelscope-windows-amd64.tar.gz
+            asset_name: modelscope-ng-windows-amd64.tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
-            asset_name: modelscope-macos-arm64.tar.gz
+            asset_name: modelscope-ng-macos-arm64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -36,14 +36,14 @@ jobs:
 
       # 构建后端服务
       - name: Build
-        run: cargo build -r --bin modelscope --target ${{ matrix.target }}
+        run: cargo build -r --bin modelscope-ng --target ${{ matrix.target }}
 
       # 压缩二进制文件
       - name: Compress binary
         if: matrix.os ==  'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          tar -czf ${{ matrix.asset_name }} modelscope.exe
+          tar -czf ${{ matrix.asset_name }} modelscope-ng.exe
         shell: bash
 
       # 压缩二进制文件
@@ -51,7 +51,7 @@ jobs:
         if: matrix.os !=  'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          tar -czf ${{ matrix.asset_name }} modelscope
+          tar -czf ${{ matrix.asset_name }} modelscope-ng
         shell: bash
 
       # 创建 Release
@@ -61,8 +61,8 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
           files: |
-            target/${{ matrix.target }}/release/modelscope-linux-amd64.tar.gz
-            target/${{ matrix.target }}/release/modelscope-windows-amd64.tar.gz
-            target/${{ matrix.target }}/release/modelscope-macos-arm64.tar.gz
+            target/${{ matrix.target }}/release/modelscope-ng-linux-amd64.tar.gz
+            target/${{ matrix.target }}/release/modelscope-ng-windows-amd64.tar.gz
+            target/${{ matrix.target }}/release/modelscope-ng-macos-arm64.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

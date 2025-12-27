@@ -1,5 +1,5 @@
 use clap::Parser;
-use modelscope::ModelScope;
+use modelscope_ng::ModelScope;
 use std::env;
 use std::path::PathBuf;
 

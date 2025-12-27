@@ -1,6 +1,6 @@
 // 回调示例 - 使用自定义回调来跟踪下载进度
 use async_trait::async_trait;
-use modelscope::{ModelScope, ProgressCallback};
+use modelscope_ng::{ModelScope, ProgressCallback};
 
 /// 自定义回调实现 - 将进度信息保存到结构体中
 #[derive(Clone)]
@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
     ModelScope::download_with_callback(
         "damo/nlp_structbert_backbone_base_std",
         "./models",
-        modelscope::SimpleCallback,
+        modelscope_ng::SimpleCallback,
     )
     .await?;
 
@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
         "damo/nlp_structbert_backbone_base_std",
         "config.json",
         "./single_file",
-        modelscope::SimpleCallback,
+        modelscope_ng::SimpleCallback,
     )
     .await?;
 

@@ -1,11 +1,11 @@
 [package]
-name = "modelscope"
+name = "modelscope-ng"
 version = "0.1.2"
 edition = "2024"
 description = "A command-line interface tool for downloading models from Modelscope, which can also be used as a library"
 license = "Apache-2.0"
-repository = "https://github.com/xgpxg/modelscope"
-documentation = "https://docs.rs/modelscope"
+repository = "https://github.com/Liangdi/modelscope"
+documentation = "https://docs.rs/modelscope-ng"
 
 [dependencies]
 serde = "1.0"
