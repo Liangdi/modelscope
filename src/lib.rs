@@ -1,12 +1,123 @@
 use anyhow::{Context, bail};
+use async_trait::async_trait;
 use futures_util::StreamExt;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env::home_dir;
 use std::fs;
 use std::io::{BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// 进度回调 trait
+#[async_trait]
+pub trait ProgressCallback: Send + Sync {
+    /// 当文件下载开始时调用
+    async fn on_file_start(&self, file_name: &str, file_size: u64);
+    
+    /// 当文件下载进度更新时调用
+    async fn on_file_progress(&self, file_name: &str, downloaded: u64, total: u64);
+    
+    /// 当文件下载完成时调用
+    async fn on_file_complete(&self, file_name: &str);
+    
+    /// 当文件下载失败时调用
+    async fn on_file_error(&self, file_name: &str, error: &str);
+}
+
+/// 默认的进度回调实现（使用进度条）
+pub struct ProgressBarCallback {
+    bars: Arc<MultiProgress>,
+    progress_bars: Arc<Mutex<HashMap<String, ProgressBar>>>,
+}
+
+impl ProgressBarCallback {
+    pub fn new() -> Self {
+        Self {
+            bars: Arc::new(MultiProgress::new()),
+            progress_bars: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl Default for ProgressBarCallback {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for ProgressBarCallback {
+    fn clone(&self) -> Self {
+        Self {
+            bars: self.bars.clone(),
+            progress_bars: self.progress_bars.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl ProgressCallback for ProgressBarCallback {
+    async fn on_file_start(&self, file_name: &str, file_size: u64) {
+        let bar = ProgressBar::new(file_size);
+        let style = ProgressStyle::default_bar().template(BAR_STYLE).unwrap();
+        bar.set_style(style);
+        bar.set_message(file_name.to_string());
+        self.bars.add(bar.clone());
+        
+        let mut bars = self.progress_bars.lock().unwrap();
+        bars.insert(file_name.to_string(), bar);
+    }
+    
+    async fn on_file_progress(&self, file_name: &str, downloaded: u64, _total: u64) {
+        let bars = self.progress_bars.lock().unwrap();
+        if let Some(bar) = bars.get(file_name) {
+            bar.set_position(downloaded);
+        }
+    }
+    
+    async fn on_file_complete(&self, file_name: &str) {
+        let mut bars = self.progress_bars.lock().unwrap();
+        if let Some(bar) = bars.remove(file_name) {
+            bar.finish();
+        }
+    }
+    
+    async fn on_file_error(&self, file_name: &str, _error: &str) {
+        let mut bars = self.progress_bars.lock().unwrap();
+        if let Some(bar) = bars.remove(file_name) {
+            bar.abandon();
+        }
+    }
+}
+
+/// 简单的回调实现，只打印进度信息
+#[derive(Clone)]
+pub struct SimpleCallback;
+
+#[async_trait]
+impl ProgressCallback for SimpleCallback {
+    async fn on_file_start(&self, file_name: &str, file_size: u64) {
+        println!("开始下载: {} (大小: {} bytes)", file_name, file_size);
+    }
+    
+    async fn on_file_progress(&self, file_name: &str, downloaded: u64, total: u64) {
+        let percent = if total > 0 {
+            (downloaded as f64 / total as f64 * 100.0) as u32
+        } else {
+            0
+        };
+        println!("下载中: {} - {}% ({} / {} bytes)", file_name, percent, downloaded, total);
+    }
+    
+    async fn on_file_complete(&self, file_name: &str) {
+        println!("下载完成: {}", file_name);
+    }
+    
+    async fn on_file_error(&self, file_name: &str, error: &str) {
+        eprintln!("下载失败: {} - 错误: {}", file_name, error);
+    }
+}
 
 const FILES_URL: &str = "https://modelscope.cn/api/v1/models/<model_id>/repo/files?Recursive=true";
 const DOWNLOAD_URL: &str = "https://modelscope.cn/models/<model_id>/resolve/master/<path>";
@@ -67,6 +178,14 @@ impl ModelScope {
     }
 
     pub async fn download(model_id: &str, save_dir: impl Into<PathBuf>) -> anyhow::Result<()> {
+        Self::download_with_callback(model_id, save_dir, ProgressBarCallback::default()).await
+    }
+
+    pub async fn download_with_callback<C: ProgressCallback + Clone + 'static>(
+        model_id: &str,
+        save_dir: impl Into<PathBuf>,
+        callback: C,
+    ) -> anyhow::Result<()> {
         // Model root dir
         let save_dir = save_dir.into();
         fs::create_dir_all(&save_dir)?;
@@ -106,21 +225,15 @@ impl ModelScope {
         Config::append_save_dir(&save_dir)?;
 
         let mut tasks = Vec::new();
-        let bars = MultiProgress::new();
 
         for repo_file in repo_files.into_iter().filter(|f| f.r#type == "blob") {
             let model_id = model_id.to_string();
             let client = client.clone();
             let save_dir = model_dir.clone();
-
-            let bar = ProgressBar::new(repo_file.size);
-            let style = ProgressStyle::default_bar().template(BAR_STYLE)?;
-            bar.set_style(style);
-
-            bars.add(bar.clone());
+            let callback = callback.clone();
 
             let task = tokio::spawn(async move {
-                let res = Self::download_file(client, model_id, repo_file, save_dir, bar).await;
+                let res = Self::download_file_with_callback(client, model_id, repo_file, save_dir, callback).await;
                 if let Err(e) = res {
                     bail!("Error downloading file: {}", e);
                 }
@@ -230,6 +343,97 @@ impl ModelScope {
         Ok(())
     }
 
+    async fn download_file_with_callback<C: ProgressCallback + Clone + 'static>(
+        client: Arc<reqwest::Client>,
+        model_id: String,
+        repo_file: RepoFile,
+        save_dir: PathBuf,
+        callback: C,
+    ) -> anyhow::Result<()> {
+        let path = &repo_file.path;
+        let name = &repo_file.name;
+
+        callback.on_file_start(name, repo_file.size).await;
+
+        let file_path = save_dir.join(path);
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let mut existing_size = 0;
+        let mut file_options = fs::OpenOptions::new();
+        file_options.write(true).create(true);
+
+        if file_path.exists() {
+            if let Ok(metadata) = fs::metadata(&file_path) {
+                existing_size = metadata.len();
+                file_options.append(true);
+            }
+        } else {
+            file_options.truncate(true);
+        }
+
+        let mut file = BufWriter::new(file_options.open(&file_path)?);
+
+        let url = DOWNLOAD_URL
+            .replace("<model_id>", &model_id)
+            .replace("<path>", path);
+
+        let mut rb = client.get(&url).header(UA.0, UA.1);
+
+        // Already downloaded, just return ok.
+        if existing_size == repo_file.size {
+            callback.on_file_complete(name).await;
+            return Ok(());
+        }
+
+        // Resume download
+        if existing_size < repo_file.size {
+            rb = rb.header("Range", format!("bytes={}-", existing_size));
+        }
+
+        let response = rb.send().await?;
+
+        let status = response.status();
+
+        // Server doesn't support resume download, re-downloading from beginning
+        // Or existing file size is larger than repo size, re-downloading from beginning
+        if status == reqwest::StatusCode::OK && existing_size > 0 || existing_size > repo_file.size
+        {
+            file.rewind()?;
+            file.get_ref().set_len(0)?;
+            existing_size = 0;
+        }
+
+        // If status is not success or partial content, bail
+        if !response.status().is_success()
+            && response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+        {
+            let error_msg = format!("HTTP {}", response.status());
+            callback.on_file_error(name, &error_msg).await;
+            bail!(
+                "Failed to download file {}: HTTP {}",
+                name,
+                response.status()
+            );
+        }
+
+        let mut stream = response.bytes_stream();
+
+        while let Some(item) = stream.next().await {
+            let chunk = item?;
+            file.write_all(&chunk)?;
+            existing_size += chunk.len() as u64;
+            callback.on_file_progress(name, existing_size, repo_file.size).await;
+        }
+
+        file.flush()?;
+
+        callback.on_file_complete(name).await;
+
+        Ok(())
+    }
+
     pub async fn login(token: &str) -> anyhow::Result<()> {
         println!("Logging in...");
         let client = Self::get_client().await?;
@@ -266,6 +470,15 @@ impl ModelScope {
         model_id: &str,
         file_path: &str,
         save_dir: impl Into<PathBuf>,
+    ) -> anyhow::Result<()> {
+        Self::download_single_file_with_callback(model_id, file_path, save_dir, ProgressBarCallback::default()).await
+    }
+
+    pub async fn download_single_file_with_callback<C: ProgressCallback + Clone + 'static>(
+        model_id: &str,
+        file_path: &str,
+        save_dir: impl Into<PathBuf>,
+        callback: C,
     ) -> anyhow::Result<()> {
         let save_dir = save_dir.into();
         fs::create_dir_all(&save_dir)?;
@@ -310,11 +523,7 @@ impl ModelScope {
             .find(|f| f.path == file_path && f.r#type == "blob")
             .ok_or_else(|| anyhow::anyhow!("File not found in model: {}", file_path))?;
 
-        let bar = ProgressBar::new(repo_file.size);
-        let style = ProgressStyle::default_bar().template(BAR_STYLE)?;
-        bar.set_style(style);
-
-        Self::download_file(client, model_id.to_string(), repo_file, model_dir, bar).await?;
+        Self::download_file_with_callback(client, model_id.to_string(), repo_file, model_dir, callback).await?;
 
         Ok(())
     }

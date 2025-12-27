@@ -16,6 +16,7 @@ reqwest = { version = "0.12.23", default-features = false,features = ["rustls-tl
 clap = { version = "4.5.47", features = ["derive"] }
 indicatif = "0.18.0"
 futures-util = "0.3.31"
+async-trait = "0.1.89"
 
 
 [profile.release]
